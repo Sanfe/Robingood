@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import os
 import asyncio
-import shutil
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, MessageIdInvalidError
 from aiohttp import web
@@ -39,7 +38,7 @@ logger = logging.getLogger(__name__)
 client = TelegramClient('streaming', API_ID, API_HASH)
 
 # Conexión a la base de datos
-DB_PATH = os.getenv('DB_PATH', 'processed_files.db')
+DB_PATH = os.getenv('DB_PATH')
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 cursor.execute('''CREATE TABLE IF NOT EXISTS files
@@ -74,12 +73,16 @@ async def handle_proxy_request(request):
             start_str, end_str = range_header.replace('bytes=', '').split('-')
             start = int(start_str)
             end = int(end_str) if end_str else None
+            if not end:
+                end = message.file.size - 1
             response.set_status(206)
-            response.headers['Content-Range'] = f'bytes {start}-{end or message.file.size - 1}/{message.file.size}'
+            response.headers['Content-Range'] = f'bytes {start}-{end}/{message.file.size}'
+            response.headers['Content-Length'] = str(end - start + 1)
             await response.prepare(request)
-            async for chunk in client.iter_download(message.media, offset=start, limit=end):
+            async for chunk in client.iter_download(message.media, offset=start, limit=end - start + 1):
                 await response.write(chunk)
         else:
+            response.headers['Content-Length'] = str(message.file.size)
             await response.prepare(request)
             async for chunk in client.iter_download(message.media):
                 await response.write(chunk)
@@ -113,6 +116,12 @@ def create_movie_nfo(folder, title, premiered):
     nfo_path = folder / "movie.nfo"
     with nfo_path.open('w') as nfo_file:
         nfo_file.write(f"<movie>\n  <title>{title}</title>\n  <premiered>{premiered}</premiered>\n</movie>")
+    logger.info(f"Archivo NFO creado: {nfo_path}")
+
+def create_tvshow_nfo(folder, title):
+    nfo_path = folder / "tvshow.nfo"
+    with nfo_path.open('w') as nfo_file:
+        nfo_file.write(f"<tvshow>\n  <title>{title}</title>\n</tvshow>")
     logger.info(f"Archivo NFO creado: {nfo_path}")
 
 def delete_empty_folders(folder, root_folders):
@@ -183,6 +192,7 @@ async def process_channel(channel_name, channel_info):
                 proper_folder.mkdir(parents=True, exist_ok=True)
                 clean_file_name = f"{title} ({premiered}){Path(filename).suffix}"
                 create_movie_nfo(proper_folder, title, premiered)
+                strm_path = proper_folder / f"{clean_file_name}.strm"
             elif channel_name == 'Series':
                 episode_info = parse_episode_info(filename)
                 if not episode_info:
@@ -194,11 +204,16 @@ async def process_channel(channel_name, channel_info):
                         continue
                 title, season, episode = episode_info
                 title = capitalize_title(title)
-                proper_folder = folder_path / title / f"Season {season}"
+                proper_folder = folder_path / title
                 proper_folder.mkdir(parents=True, exist_ok=True)
                 clean_file_name = f"{title} - S{season:02}E{episode:02}{Path(filename).suffix}"
+                # Crear tvshow.nfo si no existe
+                if not (proper_folder / "tvshow.nfo").exists():
+                    create_tvshow_nfo(proper_folder, title)
+                season_folder = proper_folder / f"Season {season}"
+                season_folder.mkdir(parents=True, exist_ok=True)
+                strm_path = season_folder / f"{clean_file_name}.strm"
 
-            strm_path = proper_folder / f"{clean_file_name}.strm"
             with strm_path.open('w') as strm_file:
                 strm_file.write(f"{BASE_URL}/{channel_name}/{file_id}")
 
