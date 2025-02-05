@@ -11,7 +11,7 @@ What make the difference?
 - Control channel for 3 commands. /start to start the monitoring, /stop to kill the process, /TMM to force TMM task now.
 - Channel 2 Request the option to create a folder if you send a TV Show joined message.
 
-# Robingood_streaming - Telegram streamer from your own channel.
+# Robingood_STRM - Telegram streamer from your own channel.
 
 - Suitable files max 4 gb allowed by telegram, it allows to streaming video message / video files in one part.
 - It creates a web internal proxy in localhost, linked with a sqlite database that monitor the path of files.
