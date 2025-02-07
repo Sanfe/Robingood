@@ -10,7 +10,7 @@ import signal
 import json
 from telethon import TelegramClient, events, types
 from telethon.errors import SessionPasswordNeededError, RPCError
-
+from messages import Messages as msg
 from dotenv import load_dotenv
 
 # Cargar el archivo .env
@@ -20,34 +20,35 @@ load_dotenv()
 API_ID = int(os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH')
 PHONE_NUMBER = os.getenv('PHONE_NUMBER')
-SESSION_FILE = os.getenv('DOWNLOAD_SESSION_FILE', 'robingood')
+SESSION_FILE = os.getenv('DW_SESSION')
 
 # IDs de los canales
-CHANNEL_ID_1 = (os.getenv('MOVIES_DOWNLOAD_CHANNEL_ID'))  # Canal de películas
-CHANNEL_ID_2 = (os.getenv('SERIES_DOWNLOAD_CHANNEL_ID'))  # Canal de series
-CONTROL_CHANNEL_ID = int(os.getenv('CONTROL_DOWNLOAD_CHANNEL_ID'))  # Canal de control
+CONTROL_CHANNEL_ID = int(os.getenv('CONTROL_CH_ID'))  # Canal de control
+CHANNEL_ID_1 = int(os.getenv('DW_MOVIES_CH_ID'))  # Canal de películas
+CHANNEL_ID_2 = int(os.getenv('DW_TV_CH_CH_ID'))  # Canal de series
+
 
 # Directorios para guardar y extraer archivos
-SAVE_DIR_1 = os.getenv('MOVIES_DOWNLOAD_TEMP_FOLDER')
-SAVE_DIR_2 = os.getenv('SERIES_DOWNLOAD_TEMP_FOLDER')
-EXTRACT_DIR_1 = os.getenv('MOVIES_DOWNLOAD_FOLDER')
-EXTRACT_DIR_2 = os.getenv('SERIES_DOWNLOAD_FOLDER')
+SAVE_DIR_1 = os.getenv('DW_MOVIES_T_FOLDER')
+SAVE_DIR_2 = os.getenv('DW_TV_T_FOLDER')
+EXTRACT_DIR_1 = os.getenv('DW_MOVIES_FOLDER')
+EXTRACT_DIR_2 = os.getenv('DW_TV_FOLDER')
 
 # Tiempo de espera entre cada ciclo de revisión (en segundos)
 WAIT_TIME = int(os.getenv('WAIT_TIME'))
 
 # Configuración de TinyMediaManager
 USE_TMM = os.getenv('USE_TMM', 'True').lower() == 'true'
-TMM_CHANNEL_ID_1_COMMAND = "/home/deck/Applications/tinyMediaManager/./tinyMediaManager movie -u -n -r"
-TMM_CHANNEL_ID_2_COMMAND = "/home/deck/Applications/tinyMediaManager/./tinyMediaManager tvshow -u -n -r"
+TMM_CHANNEL_ID_1_COMMAND = os.getenv('TMM_CH_MOVIES_CMD')
+TMM_CHANNEL_ID_2_COMMAND = os.getenv('TMM_CH_TV_CMD')
 
 # Mensajes configurables
-MESSAGE_PROMPT_FOLDER = "Se detectó un grupo con ID `{grouped_id}`. ¿Quieres guardar los archivos en una carpeta nueva? Responde con `Y` o `N`."
-MESSAGE_ENTER_FOLDER_NAME = "Por favor, introduce el nombre de la carpeta:"
-MESSAGE_TIMEOUT_FOLDER = "No se recibió respuesta. Procediendo con la descarga y extracción."
-MESSAGE_FOLDER_CREATED = "Carpeta `{folder_name}` creada exitosamente."
-MESSAGE_PROCESS_COMPLETE = "Archivos del grupo `{grouped_id}` procesados y guardados en `{folder_path}`."
-MESSAGE_NO_FILES_FOUND = "No se encontraron archivos en el grupo."
+MESSAGE_PROMPT_FOLDER = msg.PROMPT_FOLDER
+MESSAGE_ENTER_FOLDER_NAME = msg.ENTER_FOLDER_NAME
+MESSAGE_TIMEOUT_FOLDER = msg.TIMEOUT_FOLDER
+MESSAGE_FOLDER_CREATED = msg.FOLDER_CREATED
+MESSAGE_PROCESS_COMPLETE = msg.PROCESS_COMPLETE
+MESSAGE_NO_FILES_FOUND = msg.NO_FILES_FOUND
 
 # Variables globales
 is_running = False
@@ -282,14 +283,14 @@ async def main():
     @client.on(events.NewMessage(chats=CONTROL_CHANNEL_ID))
     async def command_handler(event):
         global is_running
-        if event.raw_text == "/start":
+        if event.raw_text == "/start download":
             if not is_running:
                 is_running = True
                 await event.reply("Script iniciado.")
                 await main_loop(client)
             else:
                 await event.reply("El script ya está en ejecución.")
-        elif event.raw_text == "/stop":
+        elif event.raw_text == "/stop download":
             if is_running:
                 is_running = False
                 await event.reply("Script detenido.")
