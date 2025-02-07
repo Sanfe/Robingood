@@ -18,6 +18,7 @@ import re
 from messages import Messages as msg
 from aiohttp import web
 from urllib.parse import quote
+import shlex
 
 # Cargar variables de entorno
 load_dotenv()
@@ -34,7 +35,11 @@ SERIES_FOLDER = Path(os.getenv('SERIES_FOLDER'))
 DB_PATH = os.getenv('DB_PATH', 'robingood.db')
 RATE_LIMIT = int(os.getenv('RATE_LIMIT', 20))
 RECONNECTION_INTERVAL = int(os.getenv('RECONNECTION_INTERVAL', 300))
-CHUNK_SIZE = 1024 * 1024  # 1MB
+CHUNK_SIZE = 512 * 1024  # 1MB
+# Añadir después de las variables de entorno existentes
+BATCH_SIZE = int(os.getenv('BATCH_SIZE', 50))  # Tamaño del lote para iter_messages
+TMDB_API_KEY = os.getenv('TMDB_API_KEY')
+TMDB_LANGUAGE = os.getenv('TMDB_LANGUAGE', 'es-ES')
 
 # Configuración de logging
 logging.basicConfig(
@@ -206,6 +211,15 @@ def init_globals():
                  attempts INTEGER DEFAULT 1,
                  PRIMARY KEY (message_id, channel_id))''')
 
+    # Añadir en la sección de creación de tablas
+    cursor.execute('''CREATE TABLE IF NOT EXISTS skipped_files
+                (message_id TEXT,
+                 channel_id INTEGER,
+                 filename TEXT,
+                 skip_reason TEXT,
+                 skipped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                 PRIMARY KEY (message_id, channel_id))''')
+
     # Registrar handlers después de inicializar el cliente
     register_handlers()
 
@@ -229,17 +243,22 @@ async def add_channel_handler(event):
     if event.chat_id != CONTROL_CHANNEL_ID:
         return
 
-    args = event.text.split()
-    if len(args) != 2:
-        await event.respond(msg.CMD["ADD"]["USAGE"])
-        return
-
     try:
+        args = event.text.split()
+        if len(args) != 2:
+            await event.respond(msg.CMD["ADD"]["USAGE"])
+            return
+
         channel_id = int(args[1])
         await rate_limiter.acquire()
-        channel = await client.get_entity(channel_id)
 
-        if not channel.broadcast:
+        try:
+            channel = await client.get_entity(PeerChannel(channel_id))
+        except ValueError:
+            # Intentar obtener el canal directamente si PeerChannel falla
+            channel = await client.get_entity(channel_id)
+
+        if not getattr(channel, 'broadcast', False):
             await event.respond(msg.CMD["ADD"]["NOT_CHANNEL"])
             return
 
@@ -249,20 +268,26 @@ async def add_channel_handler(event):
         """, (channel_id, channel.title))
 
         if cursor.rowcount > 0:
+            # Asegurarse de que se hace commit antes de iniciar la indexación
             conn.commit()
             await event.respond(msg.CMD["ADD"]["SUCCESS"].format(name=channel.title))
+            # Crear una nueva tarea para indexar el canal
             asyncio.create_task(index_channel(channel_id))
         else:
-            await event.respond(msg.CMD["ADD"]["EXISTS"].format(name=channel.title))
+            # Verificar si el canal ya existe
+            cursor.execute("SELECT name FROM channels WHERE channel_id = ?", (channel_id,))
+            existing = cursor.fetchone()
+            if existing:
+                await event.respond(msg.CMD["ADD"]["EXISTS"].format(name=existing[0]))
+            else:
+                raise Exception("Error al insertar el canal en la base de datos")
 
-    except ValueError:
+    except ValueError as e:
         await event.respond(msg.CMD["ADD"]["INVALID_ID"])
+        logger.error(f"Error en add_channel_handler (ValueError): {str(e)}")
     except Exception as e:
         await event.respond(msg.CMD["ADD"]["ERROR"].format(error=str(e)))
-
-# [Continúa con el resto de handlers...]
-
-# Continuación de los handlers y funciones principales...
+        logger.error(f"Error en add_channel_handler: {str(e)}")
 
 async def edit_list_handler(event):
     """Handler para el comando /edit list"""
@@ -270,29 +295,135 @@ async def edit_list_handler(event):
         return
 
     try:
-        cursor.execute("""
+        args = event.text.split()
+        media_type = args[2] if len(args) > 2 else None
+
+        if media_type and media_type not in ['movie', 'serie']:
+            await event.respond(msg.CMD["EDIT_LIST"]["INVALID_TYPE"])
+            return
+
+        # Query base para obtener archivos no excluidos
+        query = """
             SELECT message_id, channel_id, filename
             FROM unrecognized_files
-            ORDER BY channel_id, filename
-        """)
+            WHERE NOT EXISTS (
+                SELECT 1 FROM skipped_files
+                WHERE skipped_files.message_id = unrecognized_files.message_id
+                AND skipped_files.channel_id = unrecognized_files.channel_id
+            )
+        """
+
+        cursor.execute(query)
         files = cursor.fetchall()
 
         if not files:
             await event.respond(msg.CMD["EDIT_LIST"]["EMPTY"])
             return
 
-        response = [msg.CMD["EDIT_LIST"]["HEADER"]]
+        # Organizar archivos por tipo
+        movies = []
+        series = []
 
         for message_id, channel_id, filename in files:
-            response.append(f"`{message_id}` - {filename}")
+            # Configuración mejorada de guessit
+            options = {
+                'name_only': True,
+                'advanced': True,
+                'expected_title': ['movie', 'episode']
+            }
+            guess = guessit(filename, options)
 
-            if len(response) > 50:  # Limitamos a 50 archivos por mensaje
-                await event.respond("\n".join(response))
-                response = [msg.CMD["EDIT_LIST"]["CONTINUE"]]
+            if guess.get('type') == 'movie':
+                movies.append((message_id, channel_id, filename))
+            elif guess.get('type') == 'episode':
+                series.append((message_id, channel_id, filename))
 
-        if response:
-            response.append(msg.CMD["EDIT_LIST"]["FOOTER"])
-            await event.respond("\n".join(response))
+        # Preparar respuesta según el tipo solicitado
+        response = [msg.CMD["EDIT_LIST"]["HEADER"]]
+
+        if not media_type or media_type == 'movie':
+            response.append("\n🎬 PELÍCULAS:")
+            for message_id, channel_id, filename in movies:
+                response.append(f"`{message_id}` - {filename}")
+
+        if not media_type or media_type == 'serie':
+            response.append("\n📺 SERIES:")
+            for message_id, channel_id, filename in series:
+                response.append(f"`{message_id}` - {filename}")
+
+        # Enviar respuesta en bloques si es necesario
+        current_block = []
+        for line in response:
+            current_block.append(line)
+            if len('\n'.join(current_block)) > 4000:  # Límite de Telegram
+                await event.respond('\n'.join(current_block))
+                current_block = []
+
+        if current_block:
+            current_block.append(msg.CMD["EDIT_LIST"]["FOOTER"])
+            await event.respond('\n'.join(current_block))
+
+    except Exception as e:
+        logger.error(msg.LOG_ERROR.format(error=str(e)))
+        await event.respond(f"{msg.ERROR_PREFIX}{str(e)}")
+
+async def skip_handler(event):
+    """Handler para el comando /skip"""
+    if event.chat_id != CONTROL_CHANNEL_ID:
+        return
+
+    try:
+        args = event.text.split(maxsplit=2)
+        if len(args) < 2:
+            await event.respond(msg.CMD["SKIP"]["USAGE"])
+            return
+
+        # Procesar rango de IDs y razón
+        id_range = args[1]
+        reason = args[2] if len(args) > 2 else "skipped by user"
+
+        # Procesar rango
+        message_ids = []
+        for part in id_range.split(','):
+            if '-' in part:
+                start, end = map(int, part.strip('[]').split('-'))
+                message_ids.extend(range(start, end + 1))
+            else:
+                message_ids.append(int(part.strip('[]')))
+
+        message_ids = sorted(list(set(message_ids)))  # Eliminar duplicados y ordenar
+
+        skipped = 0
+        errors = 0
+
+        for message_id in message_ids:
+            try:
+                cursor.execute("""
+                    INSERT INTO skipped_files (message_id, channel_id, filename, skip_reason)
+                    SELECT message_id, channel_id, filename, ?
+                    FROM unrecognized_files
+                    WHERE message_id = ?
+                    AND NOT EXISTS (
+                        SELECT 1 FROM skipped_files
+                        WHERE message_id = unrecognized_files.message_id
+                    )
+                """, (reason, str(message_id)))
+
+                if cursor.rowcount > 0:
+                    skipped += 1
+                else:
+                    errors += 1
+
+            except Exception as e:
+                logger.error(f"Error skipping message {message_id}: {str(e)}")
+                errors += 1
+
+        conn.commit()
+        await event.respond(msg.CMD["SKIP"]["RESULT"].format(
+            skipped=skipped,
+            errors=errors,
+            total=len(message_ids)
+        ))
 
     except Exception as e:
         logger.error(msg.LOG_ERROR.format(error=str(e)))
@@ -304,80 +435,75 @@ async def edit_handler(event):
         return
 
     try:
-        args = event.text.split(maxsplit=3)
-        if len(args) < 4:
+        # Dividir manteniendo las comillas
+        args = shlex.split(event.text)
+        if len(args) != 4:  # /edit <tipo> <nombre_actual> <nombre_nuevo>
             await event.respond(msg.CMD["EDIT"]["USAGE"])
             return
 
-        message_id = args[1]
-        media_type = args[2].lower()
-        new_name = args[3].strip('" ')  # Eliminamos comillas si existen
+        media_type = args[1].lower()
+        current_name = args[2]  # nombre actual
+        new_name = args[3]      # nombre nuevo
 
         if media_type not in ['movie', 'serie']:
             await event.respond(msg.CMD["EDIT"]["INVALID_TYPE"])
             return
 
         cursor.execute("""
-            SELECT channel_id, filename
+            SELECT message_id, channel_id, filename
             FROM unrecognized_files
-            WHERE message_id = ?
-        """, (message_id,))
+            WHERE filename LIKE ?
+            AND NOT EXISTS (
+                SELECT 1 FROM skipped_files
+                WHERE skipped_files.message_id = unrecognized_files.message_id
+            )
+        """, (f"%{current_name}%",))
 
-        result = cursor.fetchone()
-        if not result:
+        files = cursor.fetchall()
+        if not files:
             await event.respond(msg.CMD["EDIT"]["NOT_FOUND"])
             return
 
-        channel_id, old_filename = result
+        success = 0
+        errors = 0
 
-        try:
+        # Procesar en lotes usando BATCH_SIZE
+        for i in range(0, len(files), BATCH_SIZE):
+            batch = files[i:i + BATCH_SIZE]
+            message_ids = [int(msg_id) for msg_id, channel_id, _ in batch]
+            channel_id = batch[0][1]  # Todos los mensajes del mismo canal
+
             await rate_limiter.acquire()
-            message = await client.get_messages(channel_id, ids=int(message_id))
-            if not message or not message.file:
-                await event.respond(msg.CMD["EDIT"]["NO_ACCESS"])
-                return
-        except Exception as e:
-            await event.respond(msg.CMD["ADD"]["ERROR"].format(error=str(e)))
-            return
+            messages = await client.get_messages(channel_id, ids=message_ids)
 
-        extension = Path(old_filename).suffix
-        if media_type == 'movie':
-            if not re.match(r'.+\(\d{4}\)$', new_name):
-                await event.respond(msg.CMD["EDIT"]["INVALID_MOVIE"])
-                return
-            formatted_name = f"{new_name}{extension}"
-        else:
-            match = re.match(r'(.+?)\s*S(\d{1,2})E(\d{1,2})$', new_name)
-            if not match:
-                await event.respond(msg.CMD["EDIT"]["INVALID_SERIES"])
-                return
-            show_name, season, episode = match.groups()
-            formatted_name = f"{show_name} - S{int(season):02d}E{int(episode):02d}{extension}"
+            for message, (msg_id, _, filename) in zip(messages, batch):
+                if not message or not message.file:
+                    errors += 1
+                    continue
 
-        # En lugar de modificar message.file.name, creamos un nuevo objeto con la información necesaria
-        media_info = guessit(formatted_name)
-        if not media_info or 'type' not in media_info:
-            await event.respond(msg.CMD["EDIT"]["INVALID_FORMAT"])
-            return
+                if await process_media_message_with_name(
+                    message,
+                    channel_id,
+                    f"{new_name}{Path(filename).suffix}"
+                ):
+                    cursor.execute("""
+                        DELETE FROM unrecognized_files
+                        WHERE message_id = ? AND channel_id = ?
+                    """, (str(msg_id), channel_id))
+                    success += 1
+                else:
+                    errors += 1
 
-        # Procesar el mensaje directamente con el nombre formateado
-        if await process_media_message_with_name(message, channel_id, formatted_name):
-            cursor.execute("""
-                DELETE FROM unrecognized_files
-                WHERE message_id = ? AND channel_id = ?
-            """, (message_id, channel_id))
-            conn.commit()
-            await event.respond(msg.CMD["EDIT"]["SUCCESS"].format(
-                old=old_filename,
-                new=formatted_name
-            ))
-        else:
-            await event.respond(msg.CMD["EDIT"]["ERROR"])
+        conn.commit()
+        await event.respond(msg.CMD["EDIT"]["BATCH_RESULT"].format(
+            success=success,
+            errors=errors,
+            total=len(files)
+        ))
 
     except Exception as e:
         logger.error(msg.LOG_ERROR.format(error=str(e)))
         await event.respond(f"{msg.ERROR_PREFIX}{str(e)}")
-
 async def process_media_message_with_name(message, channel_id, forced_name):
     """Procesa un mensaje de media con un nombre forzado."""
     if not message.file or not message.file.mime_type.startswith('video/'):
@@ -512,61 +638,67 @@ async def del_channel_handler(event):
             return
 
         channel_name = result[0]
+        deleted_files = 0
+        deleted_dirs = set()
 
-        # Obtener y eliminar archivos STRM
-        cursor.execute("SELECT file_path FROM files WHERE channel_id = ?", (channel_id,))
-        files = cursor.fetchall()
+        try:
+            # Obtener todos los archivos del canal
+            cursor.execute("SELECT file_path FROM files WHERE channel_id = ?", (channel_id,))
+            files = cursor.fetchall()
 
-        deleted_count = 0
-        directories_to_check = set()
+            # Eliminar archivos STRM
+            for (file_path,) in files:
+                try:
+                    path = Path(file_path)
+                    if path.exists():
+                        path.unlink()
+                        deleted_files += 1
 
-        for (file_path,) in files:
-            try:
-                path = Path(file_path)
-                if path.exists():
-                    path.unlink()
-                    deleted_count += 1
+                        # Añadir el directorio padre para revisión posterior
+                        parent = path.parent
+                        while parent not in [MOVIES_FOLDER, SERIES_FOLDER]:
+                            deleted_dirs.add(parent)
+                            if parent.parent in [MOVIES_FOLDER, SERIES_FOLDER]:
+                                break
+                            parent = parent.parent
 
-                    # Almacenar directorios para verificar después
-                    current_dir = path.parent
-                    while current_dir in [MOVIES_FOLDER, SERIES_FOLDER] or \
-                          current_dir.parent in [MOVIES_FOLDER, SERIES_FOLDER]:
-                        directories_to_check.add(current_dir)
-                        current_dir = current_dir.parent
+                except Exception as e:
+                    logger.error(f"Error eliminando archivo {file_path}: {str(e)}")
 
-            except Exception as e:
-                logger.error(f"Error eliminando archivo {file_path}: {str(e)}")
+            # Eliminar directorios vacíos
+            for directory in sorted(deleted_dirs, key=lambda x: len(str(x).split('/')), reverse=True):
+                try:
+                    if directory.exists() and not any(directory.iterdir()):
+                        directory.rmdir()
+                except Exception as e:
+                    logger.error(f"Error eliminando directorio {directory}: {str(e)}")
 
-        # Eliminar directorios vacíos, comenzando desde los más profundos
-        deleted_dirs = []
-        for directory in sorted(directories_to_check, key=lambda x: len(str(x).split('/')), reverse=True):
-            try:
-                if directory.exists() and not any(directory.iterdir()):
-                    directory.rmdir()
-                    deleted_dirs.append(directory.name)
-            except Exception as e:
-                logger.error(f"Error eliminando directorio {directory}: {str(e)}")
+            # Eliminar registros de la base de datos
+            cursor.execute("DELETE FROM files WHERE channel_id = ?", (channel_id,))
+            cursor.execute("DELETE FROM indexing_status WHERE channel_id = ?", (channel_id,))
+            cursor.execute("DELETE FROM unrecognized_files WHERE channel_id = ?", (channel_id,))
+            cursor.execute("DELETE FROM channels WHERE channel_id = ?", (channel_id,))
 
-        # Eliminar registros de la base de datos
-        cursor.execute("DELETE FROM files WHERE channel_id = ?", (channel_id,))
-        cursor.execute("DELETE FROM indexing_status WHERE channel_id = ?", (channel_id,))
-        cursor.execute("DELETE FROM unrecognized_files WHERE channel_id = ?", (channel_id,))
-        cursor.execute("DELETE FROM channels WHERE channel_id = ?", (channel_id,))
+            # Commit de los cambios en la base de datos
+            conn.commit()
 
-        conn.commit()
-
-        response = msg.CMD["DEL"]["SUCCESS"].format(
-            name=channel_name,
-            id=channel_id,
-            deleted_files=deleted_count
-        )
-
-        if deleted_dirs:
-            response += msg.CMD["DEL"]["DIRS_REMOVED"].format(
-                dirs=", ".join(deleted_dirs)
+            # Preparar mensaje de respuesta
+            response = msg.CMD["DEL"]["SUCCESS"].format(
+                name=channel_name,
+                id=channel_id,
+                deleted_files=deleted_files
             )
 
-        await event.respond(response)
+            if deleted_dirs:
+                response += msg.CMD["DEL"]["DIRS_REMOVED"].format(
+                    dirs=", ".join(d.name for d in deleted_dirs if not d.exists())
+                )
+
+            await event.respond(response)
+
+        except Exception as e:
+            logger.error(f"Error procesando eliminación: {str(e)}")
+            raise
 
     except ValueError:
         await event.respond(msg.CMD["DEL"]["INVALID_ID"])
@@ -675,8 +807,9 @@ async def import_subscribed_channels(event):
 def register_handlers():
     """Registra los handlers de comandos."""
     client.add_event_handler(add_channel_handler, events.NewMessage(pattern='/add'))
-    client.add_event_handler(edit_list_handler, events.NewMessage(pattern='/edit list'))
+    client.add_event_handler(edit_list_handler, events.NewMessage(pattern=r'/edit list( \w+)?'))
     client.add_event_handler(edit_handler, events.NewMessage(pattern='/edit'))
+    client.add_event_handler(skip_handler, events.NewMessage(pattern='/skip'))
     client.add_event_handler(status_handler, events.NewMessage(pattern='/status'))
     client.add_event_handler(import_subscribed_channels, events.NewMessage(pattern='/import'))
     client.add_event_handler(del_channel_handler, events.NewMessage(pattern='/del'))
@@ -746,24 +879,6 @@ async def handle_proxy_request(request):
         if not message or not message.file:
             return web.Response(status=404, text=msg.HTTP_FILE_NOT_FOUND)
 
-        # Obtener el nombre real del archivo desde la base de datos
-        cursor.execute("""
-            SELECT file_path FROM files
-            WHERE file_id = ? AND channel_id = ?
-        """, (str(file_id), channel_id))
-        result = cursor.fetchone()
-
-        if result:
-            # Usar el nombre del archivo sin la extensión .strm
-            display_name = Path(result[0]).stem
-        else:
-            # Fallback al nombre original del archivo
-            display_name = message.file.name or f"video_{file_id}"
-
-        # Preparar el nombre del archivo para los headers
-        ascii_name = display_name.encode('ascii', 'ignore').decode()
-        utf8_name = quote(display_name.encode('utf-8'))
-
         file_size = message.file.size
         range_header = request.headers.get('Range')
 
@@ -773,83 +888,37 @@ async def handle_proxy_request(request):
 
         if range_header:
             try:
-                # Parsear el header de rango
-                range_match = re.match(r'bytes=(\d*)-(\d*)', range_header)
+                range_match = re.match(r'bytes=(\d+)-(\d*)', range_header)
                 if range_match:
-                    start = int(range_match.group(1)) if range_match.group(1) else 0
+                    start = int(range_match.group(1))
                     end = int(range_match.group(2)) if range_match.group(2) else file_size - 1
+            except:
+                pass
 
-                if start >= file_size:
-                    return web.Response(
-                        status=416,
-                        text='Requested range not satisfiable',
-                        headers={
-                            'Content-Range': f'bytes */{file_size}',
-                            'Accept-Ranges': 'bytes',
-                            'Content-Length': '0'
-                        }
-                    )
-
-                # Ajustar el final si es necesario
-                end = min(end, file_size - 1)
-            except (ValueError, AttributeError) as e:
-                logger.error(f"Error parsing range header: {str(e)}")
-                start = 0
-                end = file_size - 1
-
-        # Configurar respuesta
-        response = web.StreamResponse(status=206 if range_header else 200)
-        response.headers.update({
-            'Accept-Ranges': 'bytes',
+        # Configurar headers básicos
+        headers = {
             'Content-Type': message.file.mime_type or 'video/mp4',
-            'Content-Disposition': f'inline; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_name}'
-        })
+            'Accept-Ranges': 'bytes',
+            'Content-Range': f'bytes {start}-{end}/{file_size}',
+            'Content-Length': str(end - start + 1)
+        }
 
-        if range_header:
-            response.headers['Content-Range'] = f'bytes {start}-{end}/{file_size}'
-        response.headers['Content-Length'] = str(end - start + 1)
-
+        # Preparar respuesta
+        response = web.StreamResponse(
+            status=206 if range_header else 200,
+            headers=headers
+        )
         await response.prepare(request)
 
         try:
-            CHUNK_SIZE = 1024 * 1024  # 1MB chunks
-            bytes_sent = 0
-            total_to_send = end - start + 1
-
             async for chunk in client.iter_download(
                 message.media,
                 offset=start,
-                limit=total_to_send,
-                chunk_size=CHUNK_SIZE
+                limit=end - start + 1
             ):
-                try:
-                    # Verificar si el cliente sigue conectado
-                    if not response._payload_writer or response._payload_writer.transport is None:
-                        logger.info("Conexión perdida")
-                        break
+                await response.write(chunk)
 
-                    await response.write(chunk)
-                    bytes_sent += len(chunk)
-
-                    if bytes_sent >= total_to_send:
-                        break
-
-                except ConnectionResetError:
-                    logger.info("Conexión reiniciada por el cliente")
-                    break
-                except RuntimeError as e:
-                    if "Cannot write to closing transport" in str(e):
-                        logger.info("Transporte cerrado durante la escritura")
-                        break
-                    raise
-
-            # Verificar si podemos cerrar la respuesta correctamente
-            try:
-                if response._payload_writer and response._payload_writer.transport:
-                    await response.write_eof()
-            except (ConnectionResetError, RuntimeError):
-                logger.info("Error al cerrar el stream - Cliente probablemente desconectado")
-
+            await response.write_eof()
             return response
 
         except Exception as e:
@@ -865,6 +934,7 @@ async def handle_proxy_request(request):
 async def index_channel(channel_id):
     """Indexa un canal mensaje por mensaje."""
     try:
+        # Primera llamada a la API - obtener entidad del canal
         await rate_limiter.acquire()
         channel = await client.get_entity(PeerChannel(channel_id))
 
@@ -872,13 +942,14 @@ async def index_channel(channel_id):
         result = cursor.fetchone()
         last_processed_id = result[0] if result else 0
 
-        # Obtener el ID del último mensaje del canal
+        # Segunda llamada a la API - obtener el último mensaje
         await rate_limiter.acquire()
         messages = await client.get_messages(channel, limit=1)
         if not messages:
             raise Exception(msg.LOG_NO_MESSAGES)
 
         total_messages = messages[0].id
+        logger.info(f"Total de mensajes a procesar: {total_messages}")
 
         cursor.execute("""
             INSERT OR REPLACE INTO indexing_status
@@ -887,90 +958,70 @@ async def index_channel(channel_id):
         """, (channel_id, total_messages, last_processed_id))
         conn.commit()
 
-        current_id = last_processed_id + 1
+        processed = last_processed_id
+        messages_in_batch = 0
 
-        while current_id <= total_messages:
-            try:
-                # Obtener un solo mensaje
-                await rate_limiter.acquire()
-                message = await client.get_messages(channel, ids=current_id)
+        try:
+            # Usar min_id para asegurar que obtenemos todos los mensajes desde el último procesado
+            async for message in client.iter_messages(
+                channel,
+                reverse=True,     # Para procesar desde los más antiguos
+                min_id=last_processed_id,  # Comenzar desde el último mensaje procesado
+                wait_time=1       # Pequeña espera entre lotes internos
+            ):
+                try:
+                    messages_in_batch += 1
 
-                if message:
-                    try:
-                        if await process_media_message(message, channel_id):
-                            logger.info(f"Procesado mensaje {current_id} del canal {channel_id}")
-                    except Exception as e:
-                        logger.error(f"Error procesando mensaje {current_id}: {str(e)}")
+                    if await process_media_message(message, channel_id):
+                        logger.info(f"Procesado mensaje {message.id} del canal {channel_id}")
 
-                # Actualizar progreso
-                cursor.execute("""
-                    UPDATE indexing_status
-                    SET processed_messages = ?, last_update = datetime('now')
-                    WHERE channel_id = ?
-                """, (current_id, channel_id))
+                    processed = message.id
 
-                cursor.execute("""
-                    UPDATE channels
-                    SET last_processed_id = ?
-                    WHERE channel_id = ?
-                """, (current_id, channel_id))
-                conn.commit()
+                    # Actualizar progreso cada 10 mensajes
+                    if messages_in_batch % 10 == 0:
+                        cursor.execute("""
+                            UPDATE indexing_status
+                            SET processed_messages = ?, last_update = datetime('now')
+                            WHERE channel_id = ?
+                        """, (processed, channel_id))
 
-            except FloodWaitError as e:
-                logger.warning(f"FloodWaitError: esperando {e.seconds} segundos")
-                await asyncio.sleep(e.seconds)
-                continue
-            except Exception as e:
-                logger.error(f"Error con mensaje {current_id}: {str(e)}")
+                        cursor.execute("""
+                            UPDATE channels
+                            SET last_processed_id = ?
+                            WHERE channel_id = ?
+                        """, (processed, channel_id))
+                        conn.commit()
 
-            current_id += 1
+                    # Aplicar rate limit cada BATCH_SIZE mensajes procesados
+                    if messages_in_batch % BATCH_SIZE == 0:
+                        await rate_limiter.acquire()
+                        logger.info(f"Procesados {messages_in_batch} mensajes. Rate limit aplicado en mensaje {message.id}")
 
+                except FloodWaitError as e:
+                    logger.warning(f"FloodWaitError: esperando {e.seconds} segundos")
+                    await asyncio.sleep(e.seconds)
+                except Exception as e:
+                    logger.error(f"Error procesando mensaje {message.id}: {str(e)}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error en iter_messages: {str(e)}")
+
+        # Actualización final
         cursor.execute("""
             UPDATE indexing_status
             SET status = 'completo', last_update = datetime('now')
             WHERE channel_id = ?
         """, (channel_id,))
-        conn.commit()
-
-        logger.info(f"Indexación completada para el canal {channel_id}")
-
-    except Exception as e:
-        logger.error(msg.LOG_INDEXING_ERROR.format(channel=channel_id, error=str(e)))
-        cursor.execute("""
-            UPDATE indexing_status
-            SET status = ?, last_update = datetime('now')
-            WHERE channel_id = ?
-        """, (f"error: {str(e)}", channel_id))
-        conn.commit()
-
-        for offset in range(last_processed_id, total_messages, batch_size):
-            await rate_limiter.acquire()
-            messages = await client.get_messages(channel, limit=batch_size, add_offset=offset)
-
-            for message in messages:
-                if await process_media_message(message, channel_id):
-                    processed += 1
-
-                if processed % 10 == 0:
-                    cursor.execute("""
-                        UPDATE indexing_status
-                        SET processed_messages = ?, last_update = datetime('now')
-                        WHERE channel_id = ?
-                    """, (processed, channel_id))
-                    conn.commit()
-
-        cursor.execute("""
-            UPDATE indexing_status
-            SET processed_messages = ?, status = 'completo', last_update = datetime('now')
-            WHERE channel_id = ?
-        """, (processed, channel_id))
 
         cursor.execute("""
             UPDATE channels
             SET last_processed_id = ?
             WHERE channel_id = ?
-        """, (total_messages, channel_id))
+        """, (processed, channel_id))
         conn.commit()
+
+        logger.info(f"Indexación completada para el canal {channel_id}. Total mensajes procesados: {messages_in_batch}")
 
     except Exception as e:
         logger.error(msg.LOG_INDEXING_ERROR.format(channel=channel_id, error=str(e)))
@@ -979,7 +1030,7 @@ async def index_channel(channel_id):
             SET status = ?, last_update = datetime('now')
             WHERE channel_id = ?
         """, (f"error: {str(e)}", channel_id))
-        conn.commit()
+        # conn.commit()
 
 async def main():
     """Función principal."""
