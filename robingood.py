@@ -25,7 +25,7 @@ SESSION_FILE = os.getenv('DW_SESSION')
 # IDs de los canales
 CONTROL_CHANNEL_ID = int(os.getenv('CONTROL_CH_ID'))  # Canal de control
 CHANNEL_ID_1 = int(os.getenv('DW_MOVIES_CH_ID'))  # Canal de películas
-CHANNEL_ID_2 = int(os.getenv('DW_TV_CH_CH_ID'))  # Canal de series
+CHANNEL_ID_2 = int(os.getenv('DW_TV_CH_ID'))  # Canal de series
 
 
 # Directorios para guardar y extraer archivos
