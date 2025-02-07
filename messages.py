@@ -66,6 +66,14 @@ class Messages:
     HTTP_FILE_NOT_FOUND = "❌ Archivo no encontrado"
     HTTP_SERVER_ERROR = "❌ Error del servidor: {error}"
 
+    # Mensajes configurables adicionales
+    PROMPT_FOLDER = "Se detectó un grupo con ID `{grouped_id}`. ¿Quieres guardar los archivos en una carpeta nueva? Responde con `Y` o `N`."
+    ENTER_FOLDER_NAME = "Por favor, introduce el nombre de la carpeta:"
+    TIMEOUT_FOLDER = "No se recibió respuesta. Procediendo con la descarga y extracción."
+    FOLDER_CREATED = "Carpeta `{folder_name}` creada exitosamente."
+    PROCESS_COMPLETE = "Archivos del grupo `{grouped_id}` procesados y guardados en `{folder_path}`."
+    NO_FILES_FOUND = "No se encontraron archivos en el grupo."
+
     # Mensajes de Log
     LOG_ERROR = "Error: {error}"
     LOG_FATAL_ERROR = "Error fatal: {error}"
