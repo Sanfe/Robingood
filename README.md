@@ -65,19 +65,19 @@ VALIDATE_DUPLICATES=true
 
 robingood download always are waiting to start
 
-'/start download' to start tasks
-'/stop' to stop robingood download listening.
-'/TMM' to force tiny media manager start.
+- '/start download' to start tasks
+- '/stop' to stop robingood download listening.
+- '/TMM' to force tiny media manager start.
 
 robingood streaming
 
-'/add' channel_id
-'/edit list (movie/channel) for not identified items
-'/edit' (movie/channel) "name" "newname")
-'/skip' to delete from the /edit list
-'/status' show the streaming channels and the indexed stats
-'/import' add all media from all channels (use with caution)
-'/del' channel_id
+- '/add' channel_id
+- '/edit list (movie/channel) for not identified items
+- '/edit' (movie/channel) "name" "newname")
+- '/skip' to delete from the /edit list
+- '/status' show the streaming channels and the indexed stats
+- '/import' add all media from all channels (use with caution)
+- '/del' channel_id
 
 # TODO
 
