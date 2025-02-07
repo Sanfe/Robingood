@@ -4,12 +4,13 @@
 
 What make the difference?
 
-- Use Telethon to monitor 2 channels (Movies and Series) each 1 min
+- Use Telethon to monitor 2 channels and download (Movies and Series) each 90"
 - If you download 7z , zip or rar multipart in a joined message, it extract for you
 - for let your gallery ready to use in Kodi or other media center, it execute tiny Media Manager (TMM), You have to configure TMM in GUI first, adding the paths and your setup.
 - If you send a joined message, it questions you about a name folder, useful for TV shows, TMM needs a folder manually to make their work with TV Shows.
-- Control channel for 3 commands. /start to start the monitoring, /stop to kill the process, /TMM to force TMM task now.
-- Channel 2 Request the option to create a folder if you send a TV Show joined message.
+- Control channel 
+- Channel TV Request the option to create a folder if you send a TV Show joined message.
+- configurable language messages inside messages.py
 
 # Robingood_STRM - Telegram streamer from your own channel.
 
@@ -43,7 +44,7 @@ How to configure?
 - DW_MOVIES_T_FOLDER = 'temp folder'
 - DW_MOVIES_FOLDER = 'path'
 
-- DW_TV_CH_CH_ID = -100 # ID del canal de series
+- DW_TV_CH_ID = -100 # ID del canal de series
 - DW_TV_T_FOLDER = 'temp folder'
 - DW_TV_FOLDER = 'path'
  
@@ -60,14 +61,13 @@ ST_MOVIES_FOLDER=path
 ST_TV_FOLDER=path
 VALIDATE_DUPLICATES=true
 
-configurable language messages inside messages.py
-
 # Commands
 
 robingood download always are waiting to start
 
 '/start download' to start tasks
 '/stop' to stop robingood download listening.
+'/TMM' to force tiny media manager start.
 
 robingood streaming
 
