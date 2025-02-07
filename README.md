@@ -32,44 +32,56 @@ How to configure?
 - API_ID=''  # Replace with your API ID de Telegram
 - API_HASH=''  # Replace with your API Hash de Telegram
 - PHONE_NUMBER=''  #  
-- DOWNLOAD_SESSION_FILE='download'
-- STREAMING_SESSION_FILE='streaming'
+
+- ST_SESSION = 'streaming'
 - WAIT_TIME=60  # in seconds
 
 # vars for robingood.py
-- MOVIES_DOWNLOAD_CHANNEL_ID=' '
-- SERIES_DOWNLOAD_CHANNEL_ID=' '
-- CONTROL_DOWNLOAD_CHANNEL_ID=' '
-- MOVIES_DOWNLOAD_TEMP_FOLDER=' '
-- SERIES_DOWNLOAD_TEMP_FOLDER=' '
-- MOVIES_DOWNLOAD_FOLDER=' '
-- SERIES_DOWNLOAD_FOLDER=' '
+- DW_SESSION = 'download'  # Nombre del archivo de sesión
+  
+- DW_MOVIES_CH_ID = "-100 # ID del canal de películas
+- DW_MOVIES_T_FOLDER = 'temp folder'
+- DW_MOVIES_FOLDER = 'path'
+
+- DW_TV_CH_CH_ID = -100 # ID del canal de series
+- DW_TV_T_FOLDER = 'temp folder'
+- DW_TV_FOLDER = 'path'
  
 - USE_TMM=True  # Use TinyMediaManager (True/False)
 - STATE_FILE=download_state.json
 
 #  vars for robingood_streaming.py
-- PROXY_PORT=8080  # streaming server port
-- MOVIES_CHANNEL_ID= 
-- SERIES_CHANNEL_ID=
-- MOVIES_FOLDER=  
-- SERIES_FOLDER= 
-- DB_PATH=streaming_index.db  # path of database of processed files
-- VALIDATE_DUPLICATES=true
+ST_SESSION = 'streaming'
+DB_PATH=streaming.sqlite
+BASE_URL=http://localhost:
+PROXY_PORT = 8200
 
-# configurable language messages inside robingood.py
+ST_MOVIES_FOLDER=path
+ST_TV_FOLDER=path
+VALIDATE_DUPLICATES=true
 
-- MESSAGE_PROMPT_FOLDER = "Se detectó un grupo con ID `{grouped_id}`. ¿Quieres guardar los archivos en una carpeta nueva? Responde con `Y` o `N`."
-- MESSAGE_ENTER_FOLDER_NAME = "Por favor, introduce el nombre de la carpeta:"
-- MESSAGE_TIMEOUT_FOLDER = "No se recibió respuesta. Procediendo con la descarga y extracción."
-- MESSAGE_FOLDER_CREATED = "Carpeta `{folder_name}` creada exitosamente."
-- MESSAGE_PROCESS_COMPLETE = "Archivos del grupo `{grouped_id}` procesados y guardados en `{folder_path}`."
-- MESSAGE_NO_FILES_FOUND = "No se encontraron archivos en el grupo."
+configurable language messages inside messages.py
 
+# Commands
+
+robingood download always are waiting to start
+
+'/start download' to start tasks
+'/stop' to stop robingood download listening.
+
+robingood streaming
+
+'/add' channel_id
+'/edit list (movie/channel) for not identified items
+'/edit' (movie/channel) "name" "newname")
+'/skip' to delete from the /edit list
+'/status' show the streaming channels and the indexed stats
+'/import' add all media from all channels (use with caution)
+'/del' channel_id
 
 # TODO
 
-- ~~robingood_streaming needs some improvement with guessit and some strange file names.~~ robingood_streaming it's ready for use. 
-- Replace TMM in robingood.py with guessit.
+
+- Replace TMM in robingood.py with guessit + TMDB.
 - Windows .exe precompiled, too much round for deploy all the dependencies in python. 
 - Make a kodi addon for robingood_streaming (maybe, some day)
